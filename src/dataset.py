@@ -11,7 +11,7 @@ TRAIN_TRANSFORMS = A.Compose([
     A.ColorJitter(brightness=0.4, contrast=0.4, saturation=0.4, hue=0.0, p=0.8),
     A.Affine(scale=(0.6, 1.4), translate_percent=(-0.1, 0.1), rotate=0, p=0.6),
     A.BBoxSafeRandomCrop(erosion_rate=0.2, p=0.5),
-], bbox_params=A.BboxParams(format='coco', label_fields=['class_labels']))
+], bbox_params=A.BboxParams(format='coco', label_fields=['class_labels'], clip=True))
 
 class CocoDetectionDataset(Dataset):
     def __init__(self, root_dir, annotation_file, is_train=False):
