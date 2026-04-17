@@ -4,7 +4,7 @@ from pathlib import Path
 from PIL import Image
 import numpy as np
 from torch.utils.data import Dataset
-from transformers import DetrImageProcessor
+from transformers import DeformableDetrImageProcessor
 import albumentations as A
 
 TRAIN_TRANSFORMS = A.Compose([
@@ -24,7 +24,10 @@ class CocoDetectionDataset(Dataset):
         self.images = {img['id']: img for img in self.coco['images']}
         self.annotations = defaultdict(list)
         for ann in self.coco['annotations']:
-            self.annotations[ann['image_id']].append(ann)
+            # Map categories from 1-10 down to 0-9 to avoid index out-of-bounds in Deformable DETR Focal Loss
+            mapped_ann = ann.copy()
+            mapped_ann['category_id'] = mapped_ann['category_id'] - 1
+            self.annotations[ann['image_id']].append(mapped_ann)
 
         self.image_ids = list(self.images.keys())
 
@@ -105,7 +108,7 @@ class InferenceImageDataset(Dataset):
 
 class DetrCollator:
     """
-    Collator that applies the DetrImageProcessor to a batch of raw images and annotations.
+    Collator that applies the DeformableDetrImageProcessor to a batch of raw images and annotations.
     """
     def __init__(self, processor=None):
         if processor is None:

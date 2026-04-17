@@ -10,15 +10,13 @@ import matplotlib.pyplot as plt
 from tqdm import tqdm
 from pycocotools.coco import COCO
 from pycocotools.cocoeval import COCOeval
-from transformers import DetrImageProcessor, TrainerCallback
+from transformers import DeformableDetrImageProcessor, TrainerCallback
 from dataset import CocoDetectionDataset, DetrCollator
 from models import DetrResnet50
 from transformers import Trainer, TrainingArguments
 
 # --- Globals ---
 NUM_CLASSES = 10
-EVAL_BATCH_SIZE = 16       # batch size used during val inference (no gradients, can be larger)
-NUM_WORKERS = 8            # dataloader workers; rule of thumb: 4 per GPU
 WARMUP_STEPS = 100         # fraction of total steps used for LR warm-up
 MAP_EVAL_FREQ = 5          # run full COCO mAP eval every N epochs (expensive; skip the rest)
 LOG_STEPS = 50             # how often to log training loss
@@ -71,12 +69,12 @@ def plot_confusion_matrix(cm, classes, output_dir):
     plt.close()
 
 
-def _run_coco_inference(model, dataset, device, processor):
+def _run_coco_inference(model, dataset, device, processor, batch_size):
     """Batched inference; returns raw COCO prediction dicts."""
     model.eval()
     results = []
-    for start in tqdm(range(0, len(dataset), EVAL_BATCH_SIZE), desc="Running Inference"):
-        end = min(start + EVAL_BATCH_SIZE, len(dataset))
+    for start in tqdm(range(0, len(dataset), batch_size), desc="Running Inference"):
+        end = min(start + batch_size, len(dataset))
         batch = [dataset[i] for i in range(start, end)]
         batch_images, batch_targets = zip(*batch)
         inputs = processor(images=list(batch_images), return_tensors="pt")
@@ -96,16 +94,16 @@ def _run_coco_inference(model, dataset, device, processor):
                 x1, y1, x2, y2 = box
                 results.append({
                     "image_id": target["image_id"],
-                    "category_id": int(label),
+                    "category_id": int(label) + 1,  # Map 0-9 back to 1-10 for COCO format
                     "bbox": [float(x1), float(y1), float(x2 - x1), float(y2 - y1)],
                     "score": float(score),
                 })
     return results
 
 
-def compute_coco_map(model, dataset, device, processor):
+def compute_coco_map(model, dataset, device, processor, batch_size):
     """Returns AP@IoU=0.50 without printing COCO eval tables."""
-    results = _run_coco_inference(model, dataset, device, processor)
+    results = _run_coco_inference(model, dataset, device, processor, batch_size)
     if not results:
         return 0.0
     coco_gt = COCO(dataset.annotation_file)
@@ -118,12 +116,12 @@ def compute_coco_map(model, dataset, device, processor):
     return float(coco_eval.stats[1])  # AP@IoU=0.50
 
 
-def evaluate_metrics(model, dataset, output_dir, device):
+def evaluate_metrics(model, dataset, output_dir, device, batch_size):
     processor = DeformableDetrImageProcessor.from_pretrained("SenseTime/deformable-detr")
     model.eval()
 
     print("Running inference for COCO evaluation...")
-    results = _run_coco_inference(model, dataset, device, processor)
+    results = _run_coco_inference(model, dataset, device, processor, batch_size)
 
     if not results:
         print("No predictions generated.")
@@ -149,7 +147,8 @@ def evaluate_metrics(model, dataset, output_dir, device):
         matched_gt = set()
         for dt_ann in sorted(dt_anns, key=lambda x: x['score'], reverse=True):
             dt_bbox = dt_ann['bbox']
-            dt_cat = dt_ann['category_id']
+            # Re-subtract the 1-10 mapped ID to plot correctly onto the 0-9 metric plots
+            dt_cat = int(dt_ann['category_id']) - 1
             best_iou = 0.5
             best_gt_idx = -1
 
@@ -169,7 +168,7 @@ def evaluate_metrics(model, dataset, output_dir, device):
                     best_gt_idx = idx
 
             if best_gt_idx >= 0:
-                gt_cat = gt_anns[best_gt_idx]['category_id']
+                gt_cat = int(gt_anns[best_gt_idx]['category_id']) - 1
                 cm[gt_cat, dt_cat] += 1
                 matched_gt.add(best_gt_idx)
             else:
@@ -177,7 +176,7 @@ def evaluate_metrics(model, dataset, output_dir, device):
 
         for idx, gt_ann in enumerate(gt_anns):
             if idx not in matched_gt:
-                cm[gt_ann['category_id'], NUM_CLASSES] += 1
+                cm[int(gt_ann['category_id']) - 1, NUM_CLASSES] += 1
 
     plot_confusion_matrix(cm, range(NUM_CLASSES), output_dir)
 
@@ -210,10 +209,11 @@ class BestMapCheckpointCallback(TrainerCallback):
     spending half the training budget on validation inference.
     """
 
-    def __init__(self, eval_dataset, processor, output_dir, eval_freq=MAP_EVAL_FREQ):
+    def __init__(self, eval_dataset, processor, output_dir, eval_batch_size, eval_freq=MAP_EVAL_FREQ):
         self.eval_dataset = eval_dataset
         self.processor = processor
         self.output_dir = Path(output_dir)
+        self.eval_batch_size = eval_batch_size
         self.eval_freq = eval_freq
         self.best_map = 0.0
 
@@ -223,7 +223,7 @@ class BestMapCheckpointCallback(TrainerCallback):
         if current_epoch % self.eval_freq != 0 and not is_last_epoch:
             return
 
-        map50 = compute_coco_map(model, self.eval_dataset, args.device, self.processor)
+        map50 = compute_coco_map(model, self.eval_dataset, args.device, self.processor, self.eval_batch_size)
         print(f"  eval_map50 = {map50:.4f}  (best so far: {self.best_map:.4f})")
         if map50 > self.best_map:
             self.best_map = map50
@@ -236,14 +236,14 @@ def main():
     parser.add_argument("--data-root", type=str, default="datasets")
     parser.add_argument("--epochs", type=int, default=50)
     parser.add_argument("--batch-size", type=int, default=8)
+    parser.add_argument("--eval-batch-size", type=int, default=16,
+                        help="Batch size for generating predictions during evaluation")
     parser.add_argument("--lr", type=float, default=2e-4)    # Deformable DETR standard
     parser.add_argument("--lr-backbone", type=float, default=2e-5)    # Deformable DETR standard
     parser.add_argument("--weight-decay", type=float, default=1e-4)
     parser.add_argument("--max-grad-norm", type=float, default=0.1)
-    parser.add_argument("--num-workers", type=int, default=NUM_WORKERS,
+    parser.add_argument("--num-workers", type=int, default=4,
                         help="DataLoader worker processes (recommend 4 per GPU)")
-    parser.add_argument("--map-eval-freq", type=int, default=MAP_EVAL_FREQ,
-                        help="Run full COCO mAP eval every N epochs (1 = every epoch, expensive)")
     parser.add_argument("--output-dir", type=str, default="models")
     args = parser.parse_args()
 
@@ -317,7 +317,7 @@ def main():
         data_collator=DetrCollator(),
         callbacks=[
             BestMapCheckpointCallback(
-                eval_dataset, eval_processor, run_output_dir, eval_freq=args.map_eval_freq
+                eval_dataset, eval_processor, run_output_dir, args.eval_batch_size, eval_freq=args.map_eval_freq
             )
         ],
     )
@@ -336,7 +336,7 @@ def main():
         print(f"Loaded best mAP@0.50 model from {best_weights}")
 
     plot_losses(trainer.state.log_history, run_output_dir)
-    evaluate_metrics(model, eval_dataset, run_output_dir, trainer.args.device)
+    evaluate_metrics(model, eval_dataset, run_output_dir, trainer.args.device, args.eval_batch_size)
 
 
 if __name__ == '__main__':

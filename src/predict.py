@@ -87,7 +87,7 @@ def predict():
                     x_min, y_min, x_max, y_max = box.tolist()
                     results.append({
                         "image_id": image_id,
-                        "category_id": int(label.item()),
+                        "category_id": int(label.item()) + 1,  # Map 0-9 back to 1-10 for COCO format
                         "bbox": [x_min, y_min, x_max - x_min, y_max - y_min],
                         "score": float(score.item()),
                     })
