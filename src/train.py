@@ -3,6 +3,7 @@ import argparse
 from datetime import datetime
 from pathlib import Path
 import torch
+import numpy as np
 import matplotlib.pyplot as plt
 from pycocotools.coco import COCO
 from pycocotools.cocoeval import COCOeval
@@ -34,6 +35,28 @@ def plot_losses(log_history, output_dir):
     plt.legend()
     plt.grid(True)
     plt.savefig(output_dir / "loss_curves.png")
+    plt.close()
+
+def plot_confusion_matrix(cm, classes, output_dir):
+    plt.figure(figsize=(10, 8))
+    plt.imshow(cm, interpolation='nearest', cmap=plt.cm.Blues)
+    plt.title('Confusion Matrix (IoU > 0.5)')
+    plt.colorbar()
+    tick_marks = np.arange(len(classes))
+    target_names = [str(c) for c in classes] + ['Background']
+    plt.xticks(np.arange(len(target_names)), target_names, rotation=45)
+    plt.yticks(np.arange(len(target_names)), target_names)
+
+    thresh = cm.max() / 2.
+    for i, j in np.ndindex(cm.shape):
+        plt.text(j, i, format(int(cm[i, j]), 'd'),
+                 horizontalalignment="center",
+                 color="white" if cm[i, j] > thresh else "black")
+
+    plt.ylabel('True Label')
+    plt.xlabel('Predicted Label')
+    plt.tight_layout()
+    plt.savefig(output_dir / "confusion_matrix.png")
     plt.close()
 
 def evaluate_metrics(model, dataset, output_dir, device):
@@ -72,6 +95,54 @@ def evaluate_metrics(model, dataset, output_dir, device):
     coco_eval.evaluate()
     coco_eval.accumulate()
     coco_eval.summarize()
+
+    print("Generating Confusion Matrix...")
+    cm = np.zeros((NUM_CLASSES + 1, NUM_CLASSES + 1), dtype=int)
+    for img_info in coco_gt.imgs.values():
+        img_id = img_info['id']
+        gt_ann_ids = coco_gt.getAnnIds(imgIds=[img_id])
+        gt_anns = coco_gt.loadAnns(gt_ann_ids)
+        dt_ann_ids = coco_dt.getAnnIds(imgIds=[img_id])
+        dt_anns = coco_dt.loadAnns(dt_ann_ids)
+
+        matched_gt = set()
+        for dt_ann in sorted(dt_anns, key=lambda x: x['score'], reverse=True):
+            dt_bbox = dt_ann['bbox']
+            dt_cat = dt_ann['category_id']
+            best_iou = 0.5
+            best_gt_idx = -1
+
+            for idx, gt_ann in enumerate(gt_anns):
+                if idx in matched_gt:
+                    continue
+
+                gx, gy, gw, gh = gt_ann['bbox']
+                dx, dy, dw, dh = dt_bbox
+                xA = max(gx, dx)
+                yA = max(gy, dy)
+                xB = min(gx + gw, dx + dw)
+                yB = min(gy + gh, dy + dh)
+                interArea = max(0, xB - xA) * max(0, yB - yA)
+                boxAArea = gw * gh
+                boxBArea = dw * dh
+                iou = interArea / float(boxAArea + boxBArea - interArea)
+
+                if iou > best_iou:
+                    best_iou = iou
+                    best_gt_idx = idx
+
+            if best_gt_idx >= 0:
+                gt_cat = gt_anns[best_gt_idx]['category_id']
+                cm[gt_cat, dt_cat] += 1
+                matched_gt.add(best_gt_idx)
+            else:
+                cm[NUM_CLASSES, dt_cat] += 1
+
+        for idx, gt_ann in enumerate(gt_anns):
+            if idx not in matched_gt:
+                cm[gt_ann['category_id'], NUM_CLASSES] += 1
+
+    plot_confusion_matrix(cm, range(NUM_CLASSES), output_dir)
 
     # The precision array has shape: (iouThrs, recThrs, catIds, areaRng, maxDets)
     # We plot the PR curve for IoU=0.50 (index 0) and all areas (index 0) and maxDets=100 (index 2)
@@ -138,6 +209,10 @@ def main():
         eval_strategy="epoch",
         dataloader_num_workers=4,
         remove_unused_columns=False,
+        ddp_find_unused_parameters=False,
+        load_best_model_at_end=True,
+        metric_for_best_model="eval_loss",
+        save_total_limit=3,
     )
 
     param_dicts = [
