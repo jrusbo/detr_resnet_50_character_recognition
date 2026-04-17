@@ -317,7 +317,7 @@ def main():
         data_collator=DetrCollator(),
         callbacks=[
             BestMapCheckpointCallback(
-                eval_dataset, eval_processor, run_output_dir, args.eval_batch_size, eval_freq=args.map_eval_freq
+                eval_dataset, eval_processor, run_output_dir, args.eval_batch_size, eval_freq=MAP_EVAL_FREQ
             )
         ],
     )
