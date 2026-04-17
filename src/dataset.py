@@ -9,9 +9,9 @@ import albumentations as A
 
 TRAIN_TRANSFORMS = A.Compose([
     A.ColorJitter(brightness=0.4, contrast=0.4, saturation=0.4, hue=0.0, p=0.8),
-    A.Affine(scale=(0.6, 1.4), translate_percent=(-0.1, 0.1), rotate=0, p=0.6),
+    A.Affine(scale=(0.8, 1.2), translate_percent=(-0.1, 0.1), rotate=0, p=0.6),
     A.BBoxSafeRandomCrop(erosion_rate=0.2, p=0.5),
-], bbox_params=A.BboxParams(format='coco', label_fields=['class_labels'], clip=True))
+], bbox_params=A.BboxParams(format='coco', label_fields=['class_labels', 'bbox_indices'], clip=True))
 
 class CocoDetectionDataset(Dataset):
     def __init__(self, root_dir, annotation_file, is_train=False):
@@ -47,19 +47,30 @@ class CocoDetectionDataset(Dataset):
         if self.transform is not None and len(anns) > 0:
             bboxes = [ann['bbox'] for ann in anns]
             class_labels = [ann['category_id'] for ann in anns]
+            bbox_indices = list(range(len(anns)))
 
-            transformed = self.transform(image=image, bboxes=bboxes, class_labels=class_labels)
-
+            transformed = self.transform(
+                image=image, bboxes=bboxes, class_labels=class_labels, bbox_indices=bbox_indices
+            )
             image = transformed['image']
 
             new_anns = []
             for i, bbox in enumerate(transformed['bboxes']):
-                ann_copy = anns[i].copy()
+                orig_idx = int(transformed['bbox_indices'][i])
+                ann_copy = anns[orig_idx].copy()
                 ann_copy['bbox'] = list(bbox)
+                ann_copy['area'] = bbox[2] * bbox[3]
                 new_anns.append(ann_copy)
             anns = new_anns
 
         image = Image.fromarray(image)
+
+        # Ensure area and iscrowd exist in all annotations
+        for ann in anns:
+            if 'area' not in ann:
+                ann['area'] = ann['bbox'][2] * ann['bbox'][3]
+            if 'iscrowd' not in ann:
+                ann['iscrowd'] = 0
 
         target = {'image_id': img_id, 'annotations': anns, 'orig_size': image.size[::-1]}
 
