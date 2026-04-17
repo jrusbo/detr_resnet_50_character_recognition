@@ -37,8 +37,8 @@ def predict():
                         help="Batch size for generating predictions (speed up GPU)")
     parser.add_argument("--num-workers", "-n", type=int, default=2,
                         help="Number of CPU workers to load/process images")
-    parser.add_argument("--threshold", "-t", type=float, default=0.5,
-                        help="Confidence threshold")
+    parser.add_argument("--threshold", "-t", type=float, default=0.1,
+                        help="Confidence threshold (default: 0.1 for high sensitivity)")
     args = parser.parse_args()
 
     if not args.output:
