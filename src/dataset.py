@@ -107,11 +107,10 @@ class DetrCollator:
     """
     Collator that applies the DetrImageProcessor to a batch of raw images and annotations.
     """
-    def __init__(self, processor=None, min_size=800, max_size=1333):
+    def __init__(self, processor=None):
         if processor is None:
-            self.processor = DetrImageProcessor.from_pretrained(
-                "facebook/detr-resnet-50",
-                size={"shortest_edge": min_size, "longest_edge": max_size}
+            self.processor = DeformableDetrImageProcessor.from_pretrained(
+                "SenseTime/deformable-detr"
             )
         else:
             self.processor = processor

@@ -6,7 +6,7 @@ import torch
 import numpy as np
 from PIL import Image
 from tqdm import tqdm
-from transformers import DetrImageProcessor
+from transformers import DeformableDetrImageProcessor
 from models import DetrResnet50
 from dataset import InferenceImageDataset
 from torch.utils.data import DataLoader
@@ -17,7 +17,7 @@ NUM_CLASSES = 10
 # Move Processor and Collate out of the inner scope so they can be pickled globally!
 class InferenceCollator:
     def __init__(self):
-        self.processor = DetrImageProcessor.from_pretrained("facebook/detr-resnet-50")
+        self.processor = DeformableDetrImageProcessor.from_pretrained("SenseTime/deformable-detr")
 
     def __call__(self, batch):
         images, targets = zip(*batch)
@@ -65,7 +65,7 @@ def predict():
     results = []
 
     # We still need the processor here for post_processing the outputs
-    processor = DetrImageProcessor.from_pretrained("facebook/detr-resnet-50")
+    processor = DeformableDetrImageProcessor.from_pretrained("SenseTime/deformable-detr")
 
     with torch.no_grad():
         for encoding, batch_targets in tqdm(dataloader, desc="Generating Predictions"):

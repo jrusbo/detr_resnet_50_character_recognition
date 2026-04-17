@@ -118,11 +118,8 @@ def compute_coco_map(model, dataset, device, processor):
     return float(coco_eval.stats[1])  # AP@IoU=0.50
 
 
-def evaluate_metrics(model, dataset, output_dir, device, min_size=800, max_size=1333):
-    processor = DetrImageProcessor.from_pretrained(
-        "facebook/detr-resnet-50",
-        size={"shortest_edge": min_size, "longest_edge": max_size},
-    )
+def evaluate_metrics(model, dataset, output_dir, device):
+    processor = DeformableDetrImageProcessor.from_pretrained("SenseTime/deformable-detr")
     model.eval()
 
     print("Running inference for COCO evaluation...")
@@ -239,18 +236,14 @@ def main():
     parser.add_argument("--data-root", type=str, default="datasets")
     parser.add_argument("--epochs", type=int, default=50)
     parser.add_argument("--batch-size", type=int, default=8)
-    parser.add_argument("--lr", type=float, default=1e-4)
-    parser.add_argument("--lr-backbone", type=float, default=1e-5)
+    parser.add_argument("--lr", type=float, default=2e-4)    # Deformable DETR standard
+    parser.add_argument("--lr-backbone", type=float, default=2e-5)    # Deformable DETR standard
     parser.add_argument("--weight-decay", type=float, default=1e-4)
     parser.add_argument("--max-grad-norm", type=float, default=0.1)
-    parser.add_argument("--min-size", type=int, default=800)
-    parser.add_argument("--max-size", type=int, default=1333)
     parser.add_argument("--num-workers", type=int, default=NUM_WORKERS,
                         help="DataLoader worker processes (recommend 4 per GPU)")
     parser.add_argument("--map-eval-freq", type=int, default=MAP_EVAL_FREQ,
                         help="Run full COCO mAP eval every N epochs (1 = every epoch, expensive)")
-    parser.add_argument("--compile", action="store_true",
-                        help="Apply torch.compile() to the model for ~15-30%% extra throughput")
     parser.add_argument("--output-dir", type=str, default="models")
     args = parser.parse_args()
 
@@ -269,18 +262,12 @@ def main():
 
     model = DetrResnet50(num_classes=NUM_CLASSES)
 
-    if args.compile:
-        print("Compiling model with torch.compile() — first epoch will be slower...")
-        model = torch.compile(model)
 
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
     run_output_dir = Path(args.output_dir) / f"run_{timestamp}"
     run_output_dir.mkdir(parents=True, exist_ok=True)
 
-    eval_processor = DetrImageProcessor.from_pretrained(
-        "facebook/detr-resnet-50",
-        size={"shortest_edge": args.min_size, "longest_edge": args.max_size},
-    )
+    eval_processor = DeformableDetrImageProcessor.from_pretrained("SenseTime/deformable-detr")
 
     training_args = TrainingArguments(
         output_dir=str(run_output_dir),
@@ -327,7 +314,7 @@ def main():
         train_dataset=train_dataset,
         eval_dataset=eval_dataset,
         optimizers=(custom_optimizer, None),
-        data_collator=DetrCollator(min_size=args.min_size, max_size=args.max_size),
+        data_collator=DetrCollator(),
         callbacks=[
             BestMapCheckpointCallback(
                 eval_dataset, eval_processor, run_output_dir, eval_freq=args.map_eval_freq
@@ -345,13 +332,11 @@ def main():
     # Load the checkpoint with the highest mAP@0.50 for final evaluation
     best_weights = run_output_dir / "best_map_model.pt"
     if best_weights.exists():
-        # torch.compile wraps the model; access the original for load_state_dict
-        raw_model = model._orig_mod if hasattr(model, "_orig_mod") else model
-        raw_model.load_state_dict(torch.load(best_weights, map_location=trainer.args.device))
+        model.load_state_dict(torch.load(best_weights, map_location=trainer.args.device))
         print(f"Loaded best mAP@0.50 model from {best_weights}")
 
     plot_losses(trainer.state.log_history, run_output_dir)
-    evaluate_metrics(model, eval_dataset, run_output_dir, trainer.args.device, args.min_size, args.max_size)
+    evaluate_metrics(model, eval_dataset, run_output_dir, trainer.args.device)
 
 
 if __name__ == '__main__':
