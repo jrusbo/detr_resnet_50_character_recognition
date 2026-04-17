@@ -3,6 +3,7 @@ import json
 from pathlib import Path
 
 import torch
+from tqdm import tqdm
 from transformers import DetrImageProcessor
 from models import DetrResnet50
 from dataset import InferenceImageDataset
@@ -37,7 +38,7 @@ def predict():
     results = []
 
     with torch.no_grad():
-        for start in range(0, len(dataset), BATCH_SIZE):
+        for start in tqdm(range(0, len(dataset), BATCH_SIZE), desc="Generating Predictions"):
             end = min(start + BATCH_SIZE, len(dataset))
             batch_images, batch_targets = zip(*[dataset[i] for i in range(start, end)])
 

@@ -7,6 +7,7 @@ from pathlib import Path
 import torch
 import numpy as np
 import matplotlib.pyplot as plt
+from tqdm import tqdm
 from pycocotools.coco import COCO
 from pycocotools.cocoeval import COCOeval
 from transformers import DetrImageProcessor, TrainerCallback
@@ -74,7 +75,7 @@ def _run_coco_inference(model, dataset, device, processor):
     """Batched inference; returns raw COCO prediction dicts."""
     model.eval()
     results = []
-    for start in range(0, len(dataset), EVAL_BATCH_SIZE):
+    for start in tqdm(range(0, len(dataset), EVAL_BATCH_SIZE), desc="Running Inference"):
         end = min(start + EVAL_BATCH_SIZE, len(dataset))
         batch = [dataset[i] for i in range(start, end)]
         batch_images, batch_targets = zip(*batch)
@@ -301,6 +302,7 @@ def main():
         ddp_find_unused_parameters=False,
         load_best_model_at_end=False,
         save_total_limit=CHECKPOINT_LIMIT,
+        report_to="none",          # Disable wandb/tensorboard logging overhead
     )
 
     param_dicts = [

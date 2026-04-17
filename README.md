@@ -44,3 +44,16 @@ python src/train.py --epochs 20 --batch-size 8 --min-size 1000 --max-size 1333 -
 ```
 **Rationale:** 
 Combines the theoretical best parameters derived from the hypotheses above: upscale the digits so they survive the RESNET bottleneck, extend the training duration to let the Hungarian Matcher settle, apply balanced regularization across the longer timeframe, and rigidly protect the pre-trained backbone.
+
+## Inference / Prediction
+
+Once you have trained a model and selected the best weights, you can generate the required `pred.json` in COCO format for the test dataset using the `predict.py` script.
+
+**Command:**
+```bash
+python src/predict.py --weights models/<TARGET_RUN_DIR>/best_map_model.pt --data datasets/test
+```
+
+**Notes:**
+- Replace `<TARGET_RUN_DIR>` with the specific run folder generated in `models/` (e.g., `run_20260417_172357`).
+- The script will process the images in `datasets/test` and automatically save a `pred.json` file inside the same directory as the weights file. This file is formatted exactly as required for the final evaluation submission.
