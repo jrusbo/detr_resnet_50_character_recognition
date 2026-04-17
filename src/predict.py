@@ -3,14 +3,15 @@ import json
 from pathlib import Path
 
 import torch
+import numpy as np
+from PIL import Image
 from tqdm import tqdm
 from transformers import DetrImageProcessor
 from models import DetrResnet50
 from dataset import InferenceImageDataset
+from torch.utils.data import DataLoader
 
 NUM_CLASSES = 10
-BATCH_SIZE = 4
-THRESHOLD = 0.5
 
 
 def predict():
@@ -21,6 +22,12 @@ def predict():
                         help="Test images directory")
     parser.add_argument("--output", "-o", type=str,
                         help="Output file path (defaults to weights directory / pred.json)")
+    parser.add_argument("--batch-size", "-b", type=int, default=32,
+                        help="Batch size for generating predictions (speed up GPU)")
+    parser.add_argument("--num-workers", "-n", type=int, default=4,
+                        help="Number of CPU workers to load/process images")
+    parser.add_argument("--threshold", "-t", type=float, default=0.5,
+                        help="Confidence threshold")
     args = parser.parse_args()
 
     if not args.output:
@@ -35,24 +42,35 @@ def predict():
 
     processor = DetrImageProcessor.from_pretrained("facebook/detr-resnet-50")
     dataset = InferenceImageDataset(root_dir=args.data)
+
+    def collate_fn(batch):
+        # This pushes heavy image scaling off the main thread into the parallel CPU workers!
+        images, targets = zip(*batch)
+        encoding = processor(images=list(images), return_tensors="pt")
+        return encoding, targets
+
+    dataloader = DataLoader(
+        dataset,
+        batch_size=args.batch_size,
+        num_workers=args.num_workers,
+        collate_fn=collate_fn,
+        pin_memory=True
+    )
+
     results = []
 
     with torch.no_grad():
-        for start in tqdm(range(0, len(dataset), BATCH_SIZE), desc="Generating Predictions"):
-            end = min(start + BATCH_SIZE, len(dataset))
-            batch_images, batch_targets = zip(*[dataset[i] for i in range(start, end)])
-
-            encoding = processor(images=list(batch_images), return_tensors="pt")
-            pixel_values = encoding["pixel_values"].to(device)
+        for encoding, batch_targets in tqdm(dataloader, desc="Generating Predictions"):
+            pixel_values = encoding["pixel_values"].to(device, non_blocking=True)
             pixel_mask = encoding.get("pixel_mask")
             if pixel_mask is not None:
-                pixel_mask = pixel_mask.to(device)
+                pixel_mask = pixel_mask.to(device, non_blocking=True)
 
             outputs = model(pixel_values, pixel_mask=pixel_mask)
 
             target_sizes = [t["orig_size"] for t in batch_targets]
             results_hf = processor.post_process_object_detection(
-                outputs, target_sizes=target_sizes, threshold=THRESHOLD
+                outputs, target_sizes=target_sizes, threshold=args.threshold
             )
 
             for target, result in zip(batch_targets, results_hf):
