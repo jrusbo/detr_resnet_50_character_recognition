@@ -14,6 +14,17 @@ from torch.utils.data import DataLoader
 NUM_CLASSES = 10
 
 
+# Move Processor and Collate out of the inner scope so they can be pickled globally!
+class InferenceCollator:
+    def __init__(self):
+        self.processor = DetrImageProcessor.from_pretrained("facebook/detr-resnet-50")
+
+    def __call__(self, batch):
+        images, targets = zip(*batch)
+        encoding = self.processor(images=list(images), return_tensors="pt")
+        return encoding, targets
+
+
 def predict():
     parser = argparse.ArgumentParser(description="Inference for DETR ResNet-50 on digit detection")
     parser.add_argument("--weights", "-w", type=str, required=True,
@@ -40,24 +51,21 @@ def predict():
     model.to(device)
     model.eval()
 
-    processor = DetrImageProcessor.from_pretrained("facebook/detr-resnet-50")
     dataset = InferenceImageDataset(root_dir=args.data)
-
-    def collate_fn(batch):
-        # This pushes heavy image scaling off the main thread into the parallel CPU workers!
-        images, targets = zip(*batch)
-        encoding = processor(images=list(images), return_tensors="pt")
-        return encoding, targets
+    collator = InferenceCollator()
 
     dataloader = DataLoader(
         dataset,
         batch_size=args.batch_size,
         num_workers=args.num_workers,
-        collate_fn=collate_fn,
+        collate_fn=collator,
         pin_memory=True
     )
 
     results = []
+
+    # We still need the processor here for post_processing the outputs
+    processor = DetrImageProcessor.from_pretrained("facebook/detr-resnet-50")
 
     with torch.no_grad():
         for encoding, batch_targets in tqdm(dataloader, desc="Generating Predictions"):
