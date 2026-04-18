@@ -16,8 +16,11 @@ NUM_CLASSES = 10
 
 # Move Processor and Collate out of the inner scope so they can be pickled globally!
 class InferenceCollator:
-    def __init__(self):
-        self.processor = DeformableDetrImageProcessor.from_pretrained("SenseTime/deformable-detr")
+    def __init__(self, min_size=200, max_size=400):
+        self.processor = DeformableDetrImageProcessor.from_pretrained(
+            "SenseTime/deformable-detr",
+            size={"shortest_edge": min_size, "longest_edge": max_size}
+        )
 
     def __call__(self, batch):
         images, targets = zip(*batch)
@@ -65,7 +68,10 @@ def predict():
     results = []
 
     # We still need the processor here for post_processing the outputs
-    processor = DeformableDetrImageProcessor.from_pretrained("SenseTime/deformable-detr")
+    processor = DeformableDetrImageProcessor.from_pretrained(
+        "SenseTime/deformable-detr",
+        size={"shortest_edge": 400, "longest_edge": 800}
+    )
 
     with torch.no_grad():
         for encoding, batch_targets in tqdm(dataloader, desc="Generating Predictions"):
@@ -84,6 +90,8 @@ def predict():
             for target, result in zip(batch_targets, results_hf):
                 image_id = target["image_id"]
                 for score, label, box in zip(result["scores"], result["labels"], result["boxes"]):
+                    if label.item() >= NUM_CLASSES:
+                        continue
                     x_min, y_min, x_max, y_max = box.tolist()
                     results.append({
                         "image_id": image_id,
