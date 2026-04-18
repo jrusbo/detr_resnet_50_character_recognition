@@ -10,7 +10,7 @@ import matplotlib.pyplot as plt
 from tqdm import tqdm
 from pycocotools.coco import COCO
 from pycocotools.cocoeval import COCOeval
-from transformers import DeformableDetrImageProcessor, TrainerCallback
+from transformers import DeformableDetrImageProcessor, TrainerCallback, EarlyStoppingCallback
 from dataset import CocoDetectionDataset, DetrCollator
 from models import DetrResnet50
 from transformers import Trainer, TrainingArguments
@@ -21,6 +21,7 @@ WARMUP_STEPS = 100         # fraction of total steps used for LR warm-up
 MAP_EVAL_FREQ = 5          # run full COCO mAP eval every N epochs (expensive; skip the rest)
 LOG_STEPS = 50             # how often to log training loss
 CHECKPOINT_LIMIT = 3       # max HF checkpoints kept on disk
+MAP_SCORE_THRESHOLD = 0.2  # Score threshold for mAP evaluation (keep low to maximize metric sensitivity, separate from final PR/confusion matrix plots)
 
 
 def plot_losses(log_history, output_dir):
@@ -43,6 +44,15 @@ def plot_losses(log_history, output_dir):
     plt.title("Training and Evaluation Loss Curves")
     plt.legend()
     plt.grid(True)
+
+    # Dynamically scale Y-axis to ignore the initial random-initialization loss spike
+    if len(train_losses) > 5:
+        # Peak of valid convergence (ignore first few log steps completely)
+        tail_max = max(train_losses[5:])
+        if eval_losses:
+            tail_max = max(tail_max, max(eval_losses))
+        plt.ylim(0, tail_max * 1.2)
+
     plt.savefig(output_dir / "loss_curves.png")
     plt.close()
 
@@ -69,7 +79,7 @@ def plot_confusion_matrix(cm, classes, output_dir):
     plt.close()
 
 
-def _run_coco_inference(model, dataset, device, processor, batch_size):
+def _run_coco_inference(model, dataset, device, processor, batch_size, score_threshold=MAP_SCORE_THRESHOLD):
     """Batched inference; returns raw COCO prediction dicts."""
     model.eval()
     results = []
@@ -82,7 +92,7 @@ def _run_coco_inference(model, dataset, device, processor, batch_size):
         with torch.no_grad():
             out = model(**inputs)
         res_batch = processor.post_process_object_detection(
-            out, target_sizes=[t["orig_size"] for t in batch_targets], threshold=0.01
+            out, target_sizes=[t["orig_size"] for t in batch_targets], threshold=score_threshold
         )
         for target, res in zip(batch_targets, res_batch):
             boxes = res["boxes"].cpu().numpy()
@@ -101,9 +111,11 @@ def _run_coco_inference(model, dataset, device, processor, batch_size):
     return results
 
 
-def compute_coco_map(model, dataset, device, processor, batch_size):
-    """Returns AP@IoU=0.50 without printing COCO eval tables."""
-    results = _run_coco_inference(model, dataset, device, processor, batch_size)
+def compute_coco_map(model, dataset, device, processor, batch_size, score_threshold=MAP_SCORE_THRESHOLD):
+    """Returns AP@IoU=0.50 without printing COLO eval tables."""
+    results = _run_coco_inference(
+        model, dataset, device, processor, batch_size, score_threshold=score_threshold
+    )
     if not results:
         return 0.0
     coco_gt = COCO(dataset.annotation_file)
@@ -116,12 +128,13 @@ def compute_coco_map(model, dataset, device, processor, batch_size):
     return float(coco_eval.stats[1])  # AP@IoU=0.50
 
 
-def evaluate_metrics(model, dataset, output_dir, device, batch_size):
-    processor = DeformableDetrImageProcessor.from_pretrained("SenseTime/deformable-detr")
+def evaluate_metrics(model, dataset, output_dir, device, batch_size, processor, score_threshold):
     model.eval()
 
     print("Running inference for COCO evaluation...")
-    results = _run_coco_inference(model, dataset, device, processor, batch_size)
+    results = _run_coco_inference(
+        model, dataset, device, processor, batch_size, score_threshold=score_threshold
+    )
 
     if not results:
         print("No predictions generated.")
@@ -231,6 +244,20 @@ class BestMapCheckpointCallback(TrainerCallback):
             print("  --> New best mAP@0.50, checkpoint saved.")
 
 
+class TorchCheckpointTrainer(Trainer):
+    """Trainer variant that always writes torch checkpoints (.bin) to avoid safetensors aliasing issues."""
+
+    def _save(self, output_dir=None, state_dict=None):
+        checkpoint_dir = Path(output_dir) if output_dir is not None else Path(self.args.output_dir)
+        checkpoint_dir.mkdir(parents=True, exist_ok=True)
+
+        if state_dict is None:
+            state_dict = self.model.state_dict()
+
+        torch.save(state_dict, checkpoint_dir / "pytorch_model.bin")
+        torch.save(self.args, checkpoint_dir / "training_args.bin")
+
+
 def main():
     parser = argparse.ArgumentParser("DETR training via HF Trainer")
     parser.add_argument("--data-root", type=str, default="datasets")
@@ -238,6 +265,8 @@ def main():
     parser.add_argument("--batch-size", type=int, default=8)
     parser.add_argument("--eval-batch-size", type=int, default=16,
                         help="Batch size for generating predictions during evaluation")
+    parser.add_argument("--min-size", type=int, default=200, help="Shortest image edge for preprocessing")
+    parser.add_argument("--max-size", type=int, default=400, help="Longest image edge for preprocessing")
     parser.add_argument("--lr", type=float, default=2e-4)    # Deformable DETR standard
     parser.add_argument("--lr-backbone", type=float, default=2e-5)    # Deformable DETR standard
     parser.add_argument("--weight-decay", type=float, default=1e-4)
@@ -245,6 +274,24 @@ def main():
     parser.add_argument("--num-workers", type=int, default=4,
                         help="DataLoader worker processes (recommend 4 per GPU)")
     parser.add_argument("--output-dir", type=str, default="models")
+    parser.add_argument(
+        "--metrics-threshold",
+        type=float,
+        default=0.3,
+        help="Score threshold for final confusion-matrix/PR plots (kept separate from mAP threshold)",
+    )
+    parser.add_argument(
+        "--early-stopping-patience",
+        type=int,
+        default=3,
+        help="Stop training after this many eval epochs without improvement in eval_loss",
+    )
+    parser.add_argument(
+        "--early-stopping-threshold",
+        type=float,
+        default=0.0,
+        help="Minimum eval_loss improvement required to reset early stopping patience",
+    )
     args = parser.parse_args()
 
     data_root = Path(args.data_root)
@@ -267,7 +314,10 @@ def main():
     run_output_dir = Path(args.output_dir) / f"run_{timestamp}"
     run_output_dir.mkdir(parents=True, exist_ok=True)
 
-    eval_processor = DeformableDetrImageProcessor.from_pretrained("SenseTime/deformable-detr")
+    image_processor = DeformableDetrImageProcessor.from_pretrained(
+        "SenseTime/deformable-detr",
+        size={"shortest_edge": args.min_size, "longest_edge": args.max_size}
+    )
 
     training_args = TrainingArguments(
         output_dir=str(run_output_dir),
@@ -287,9 +337,11 @@ def main():
         dataloader_persistent_workers=True,
         remove_unused_columns=False,
         ddp_find_unused_parameters=False,
-        load_best_model_at_end=False,
         save_total_limit=CHECKPOINT_LIMIT,
         report_to="none",          # Disable wandb/tensorboard logging overhead
+        load_best_model_at_end=True,
+        metric_for_best_model="eval_loss",
+        greater_is_better=False,
     )
 
     param_dicts = [
@@ -308,18 +360,27 @@ def main():
     if sys.platform == "win32":
         torch.backends.cudnn.enabled = False
 
-    trainer = Trainer(
+    callbacks = [
+        BestMapCheckpointCallback(
+            eval_dataset, image_processor, run_output_dir, args.eval_batch_size, eval_freq=MAP_EVAL_FREQ
+        )
+    ]
+    if args.early_stopping_patience > 0:
+        callbacks.append(
+            EarlyStoppingCallback(
+                early_stopping_patience=args.early_stopping_patience,
+                early_stopping_threshold=args.early_stopping_threshold,
+            )
+        )
+
+    trainer = TorchCheckpointTrainer(
         model=model,
         args=training_args,
         train_dataset=train_dataset,
         eval_dataset=eval_dataset,
         optimizers=(custom_optimizer, None),
-        data_collator=DetrCollator(),
-        callbacks=[
-            BestMapCheckpointCallback(
-                eval_dataset, eval_processor, run_output_dir, args.eval_batch_size, eval_freq=MAP_EVAL_FREQ
-            )
-        ],
+        data_collator=DetrCollator(processor=image_processor),
+        callbacks=callbacks,
     )
 
     print(f"Starting training, saving models to {run_output_dir}")
@@ -336,7 +397,15 @@ def main():
         print(f"Loaded best mAP@0.50 model from {best_weights}")
 
     plot_losses(trainer.state.log_history, run_output_dir)
-    evaluate_metrics(model, eval_dataset, run_output_dir, trainer.args.device, args.eval_batch_size)
+    evaluate_metrics(
+        model,
+        eval_dataset,
+        run_output_dir,
+        trainer.args.device,
+        args.eval_batch_size,
+        image_processor,
+        score_threshold=args.metrics_threshold,
+    )
 
 
 if __name__ == '__main__':
