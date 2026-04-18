@@ -8,9 +8,9 @@ from transformers import DeformableDetrImageProcessor
 import albumentations as A
 
 TRAIN_TRANSFORMS = A.Compose([
-    A.ColorJitter(brightness=0.4, contrast=0.4, saturation=0.4, hue=0.0, p=0.8),
-    A.Affine(scale=(0.8, 1.2), translate_percent=(-0.1, 0.1), rotate=0, p=0.6),
-    A.BBoxSafeRandomCrop(erosion_rate=0.2, p=0.5),
+    A.ColorJitter(brightness=0.2, contrast=0.2, saturation=0.2, hue=0.0, p=0.5),
+    A.Affine(scale=(0.9, 1.1), translate_percent=(-0.05, 0.05), rotate=0, p=0.5),
+    A.GaussNoise(std_range=(0.02, 0.08), per_channel=True, p=0.2),
 ], bbox_params=A.BboxParams(format='coco', label_fields=['class_labels', 'bbox_indices'], clip=True))
 
 class CocoDetectionDataset(Dataset):
@@ -24,7 +24,7 @@ class CocoDetectionDataset(Dataset):
         self.images = {img['id']: img for img in self.coco['images']}
         self.annotations = defaultdict(list)
         for ann in self.coco['annotations']:
-            # Map categories from 1-10 down to 0-9 to avoid index out-of-bounds in Deformable DETR Focal Loss
+            # Map categories from 1-10 down to 0-9 to avoid index out-of-bounds
             mapped_ann = ann.copy()
             mapped_ann['category_id'] = mapped_ann['category_id'] - 1
             self.annotations[ann['image_id']].append(mapped_ann)
@@ -122,7 +122,9 @@ class DetrCollator:
         images, targets = zip(*batch)
 
         if "annotations" in targets[0]:
-            encoding = self.processor(images=list(images), annotations=list(targets), return_tensors="pt")
+            encoding = self.processor(
+                images=list(images), annotations=list(targets), return_tensors="pt"
+            )
             labels = encoding["labels"]
         else:
             encoding = self.processor(images=list(images), return_tensors="pt")
