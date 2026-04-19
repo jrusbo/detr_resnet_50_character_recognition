@@ -58,7 +58,6 @@ def validate_resume_checkpoint(checkpoint_dir, fp16_enabled):
         "optimizer.pt",
         "scheduler.pt",
         "trainer_state.json",
-        "rng_state.pth",
     ]
     if fp16_enabled:
         required_files.append("scaler.pt")
@@ -68,6 +67,14 @@ def validate_resume_checkpoint(checkpoint_dir, fp16_enabled):
         raise ValueError(
             "Checkpoint missing required resume files: "
             f"{', '.join(missing)} at {checkpoint_dir}"
+        )
+
+    has_single_rng = (checkpoint_dir / "rng_state.pth").exists()
+    has_sharded_rng = any(checkpoint_dir.glob("rng_state_*.pth"))
+    if not (has_single_rng or has_sharded_rng):
+        raise ValueError(
+            "Checkpoint missing RNG state file(s): expected rng_state.pth "
+            f"or rng_state_*.pth at {checkpoint_dir}"
         )
 
 
