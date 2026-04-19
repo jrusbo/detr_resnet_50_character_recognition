@@ -39,13 +39,41 @@ class CocoDetectionDataset(Dataset):
     def __len__(self):
         return len(self.image_ids)
 
+    @staticmethod
+    def _sanitize_annotations(anns, width, height):
+        """Clip COCO xywh boxes to image bounds and drop invalid boxes."""
+        sanitized = []
+        for ann in anns:
+            x, y, w, h = ann['bbox']
+            x = max(0.0, float(x))
+            y = max(0.0, float(y))
+            w = float(w)
+            h = float(h)
+
+            if w <= 0.0 or h <= 0.0:
+                continue
+
+            x2 = min(float(width), x + w)
+            y2 = min(float(height), y + h)
+            clipped_w = x2 - x
+            clipped_h = y2 - y
+            if clipped_w <= 1e-3 or clipped_h <= 1e-3:
+                continue
+
+            ann_copy = ann.copy()
+            ann_copy['bbox'] = [x, y, clipped_w, clipped_h]
+            ann_copy['area'] = clipped_w * clipped_h
+            ann_copy['iscrowd'] = int(ann_copy.get('iscrowd', 0))
+            sanitized.append(ann_copy)
+        return sanitized
+
     def __getitem__(self, idx):
         img_id = self.image_ids[idx]
         img_info = self.images[img_id]
         img_path = Path(self.root_dir) / img_info['file_name']
 
         image = np.array(Image.open(img_path).convert("RGB"))
-        anns = self.annotations[img_id]
+        anns = self._sanitize_annotations(self.annotations[img_id], img_info['width'], img_info['height'])
 
         if self.transform is not None and len(anns) > 0:
             bboxes = [ann['bbox'] for ann in anns]
@@ -64,7 +92,7 @@ class CocoDetectionDataset(Dataset):
                 ann_copy['bbox'] = list(bbox)
                 ann_copy['area'] = bbox[2] * bbox[3]
                 new_anns.append(ann_copy)
-            anns = new_anns
+            anns = self._sanitize_annotations(new_anns, image.shape[1], image.shape[0])
 
         image = Image.fromarray(image)
 
