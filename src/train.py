@@ -355,6 +355,16 @@ class TorchCheckpointTrainer(Trainer):
             persistent_workers=self.args.dataloader_persistent_workers,
         )
 
+    def _save(self, output_dir=None, state_dict=None):
+        checkpoint_dir = Path(output_dir) if output_dir is not None else Path(self.args.output_dir)
+        checkpoint_dir.mkdir(parents=True, exist_ok=True)
+
+        if state_dict is None:
+            state_dict = self.model.state_dict()
+
+        torch.save(state_dict, checkpoint_dir / "pytorch_model.bin")
+        torch.save(self.args, checkpoint_dir / "training_args.bin")
+
 
 def main():
     parser = argparse.ArgumentParser("DETR training via HF Trainer")
