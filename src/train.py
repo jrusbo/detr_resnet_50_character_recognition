@@ -310,7 +310,7 @@ def main():
     steps_per_epoch = len(train_dataset) // args.batch_size
     total_steps = steps_per_epoch * args.epochs
     calculated_warmup_steps = int(total_steps * args.warmup_ratio)
-    print(f"Calculated warmup steps: {calculated_warmup_steps} over {total_steps} total steps (5%).")
+    print(f"Calculated warmup steps: {calculated_warmup_steps} over {total_steps} total steps.")
 
     model = DetrResnet50(num_classes=NUM_CLASSES)
 
