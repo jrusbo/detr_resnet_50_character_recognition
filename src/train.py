@@ -17,7 +17,6 @@ from transformers import Trainer, TrainingArguments
 
 # --- Globals ---
 NUM_CLASSES = 10
-WARMUP_STEPS = 100         # fraction of total steps used for LR warm-up
 MAP_EVAL_FREQ = 5          # run full COCO mAP eval every N epochs (expensive; skip the rest)
 LOG_STEPS = 50             # how often to log training loss
 CHECKPOINT_LIMIT = 3       # max HF checkpoints kept on disk
@@ -269,6 +268,7 @@ def main():
     parser.add_argument("--max-size", type=int, default=400, help="Longest image edge for preprocessing")
     parser.add_argument("--lr", type=float, default=2e-4)    # Deformable DETR standard
     parser.add_argument("--lr-backbone", type=float, default=2e-5)    # Deformable DETR standard
+    parser.add_argument("--warmup-ratio", type=float, default=0.05, help="Fraction of total training steps to use for linear warmup")
     parser.add_argument("--weight-decay", type=float, default=1e-4)
     parser.add_argument("--max-grad-norm", type=float, default=0.1)
     parser.add_argument("--num-workers", type=int, default=4,
@@ -307,6 +307,11 @@ def main():
         is_train=False,
     )
 
+    steps_per_epoch = len(train_dataset) // args.batch_size
+    total_steps = steps_per_epoch * args.epochs
+    calculated_warmup_steps = int(total_steps * args.warmup_ratio)
+    print(f"Calculated warmup steps: {calculated_warmup_steps} over {total_steps} total steps (5%).")
+
     model = DetrResnet50(num_classes=NUM_CLASSES)
 
 
@@ -325,7 +330,7 @@ def main():
         num_train_epochs=args.epochs,
         learning_rate=args.lr,
         lr_scheduler_type="cosine",
-        warmup_steps=WARMUP_STEPS,
+        warmup_steps=calculated_warmup_steps,
         weight_decay=args.weight_decay,
         max_grad_norm=args.max_grad_norm,
         fp16=True,
