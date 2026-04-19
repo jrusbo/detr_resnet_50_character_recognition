@@ -4,13 +4,14 @@ import argparse
 import math
 import re
 import time
+from typing import cast
 from datetime import datetime
 from pathlib import Path
 import torch
 import numpy as np
 import matplotlib.pyplot as plt
 from tqdm import tqdm
-from torch.utils.data import DataLoader, WeightedRandomSampler
+from torch.utils.data import DataLoader, Dataset, WeightedRandomSampler
 from pycocotools.coco import COCO
 from pycocotools.cocoeval import COCOeval
 from transformers import DeformableDetrImageProcessor, TrainerCallback, EarlyStoppingCallback
@@ -40,6 +41,34 @@ def find_latest_checkpoint(run_dir):
     if not checkpoints:
         return None
     return max(checkpoints, key=_extract_checkpoint_step)
+
+
+def validate_resume_checkpoint(checkpoint_dir, fp16_enabled):
+    """Ensure checkpoint has model + trainer/optimizer/scheduler/rng state for exact resume."""
+    checkpoint_dir = Path(checkpoint_dir)
+    has_torch_model = (checkpoint_dir / "pytorch_model.bin").exists()
+    has_safe_model = (checkpoint_dir / "model.safetensors").exists()
+    if not (has_torch_model or has_safe_model):
+        raise ValueError(
+            "Checkpoint missing model weights file (expected pytorch_model.bin or model.safetensors): "
+            f"{checkpoint_dir}"
+        )
+
+    required_files = [
+        "optimizer.pt",
+        "scheduler.pt",
+        "trainer_state.json",
+        "rng_state.pth",
+    ]
+    if fp16_enabled:
+        required_files.append("scaler.pt")
+
+    missing = [name for name in required_files if not (checkpoint_dir / name).exists()]
+    if missing:
+        raise ValueError(
+            "Checkpoint missing required resume files: "
+            f"{', '.join(missing)} at {checkpoint_dir}"
+        )
 
 
 def build_class_balanced_image_weights(dataset, num_classes):
@@ -333,14 +362,14 @@ class TimeLimitStopCallback(TrainerCallback):
 class TorchCheckpointTrainer(Trainer):
     """Trainer variant that always writes torch checkpoints (.bin) to avoid safetensors aliasing issues."""
 
-    def __init__(self, **kwargs):
-        self.train_sampler = kwargs.pop("train_sampler", None)
+    def __init__(self, train_sampler=None, **kwargs):
+        self.train_sampler = train_sampler
         super().__init__(**kwargs)
 
     def get_train_dataloader(self):
         if self.train_dataset is None:
             raise ValueError("Trainer: training requires a train_dataset.")
-        train_dataset = self.train_dataset
+        train_dataset = cast(Dataset, self.train_dataset)
 
         return DataLoader(
             train_dataset,
@@ -353,16 +382,6 @@ class TorchCheckpointTrainer(Trainer):
             pin_memory=self.args.dataloader_pin_memory,
             persistent_workers=self.args.dataloader_persistent_workers,
         )
-
-    def _save(self, output_dir=None, state_dict=None):
-        checkpoint_dir = Path(output_dir) if output_dir is not None else Path(self.args.output_dir)
-        checkpoint_dir.mkdir(parents=True, exist_ok=True)
-
-        if state_dict is None:
-            state_dict = self.model.state_dict()
-
-        torch.save(state_dict, checkpoint_dir / "pytorch_model.bin")
-        torch.save(self.args, checkpoint_dir / "training_args.bin")
 
 
 def main():
@@ -475,6 +494,7 @@ def main():
 
         print(f"Resuming from checkpoint: {resume_checkpoint}")
         print(f"Run output directory: {run_output_dir}")
+        validate_resume_checkpoint(resume_checkpoint, fp16_enabled=True)
     else:
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
         run_output_dir = Path(args.output_dir) / f"run_{timestamp}"
