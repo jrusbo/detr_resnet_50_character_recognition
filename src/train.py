@@ -1,13 +1,14 @@
 ﻿import io
-import sys
 import contextlib
 import argparse
+import math
 from datetime import datetime
 from pathlib import Path
 import torch
 import numpy as np
 import matplotlib.pyplot as plt
 from tqdm import tqdm
+from torch.utils.data import DataLoader, WeightedRandomSampler
 from pycocotools.coco import COCO
 from pycocotools.cocoeval import COCOeval
 from transformers import DeformableDetrImageProcessor, TrainerCallback, EarlyStoppingCallback
@@ -21,6 +22,45 @@ MAP_EVAL_FREQ = 5          # run full COCO mAP eval every N epochs (expensive; s
 LOG_STEPS = 50             # how often to log training loss
 CHECKPOINT_LIMIT = 3       # max HF checkpoints kept on disk
 MAP_SCORE_THRESHOLD = 0.2  # Score threshold for mAP evaluation (keep low to maximize metric sensitivity, separate from final PR/confusion matrix plots)
+
+SAMPLER_ALPHA = 0.5
+SAMPLER_CAP = 0.6
+SAMPLER_MAX_IMAGE_WEIGHT = 1.8
+
+
+def build_class_balanced_image_weights(dataset, num_classes):
+    """Build per-image sampling weights from class frequencies (multi-class aware)."""
+    class_counts = np.zeros(num_classes, dtype=np.float64)
+    for anns in dataset.annotations.values():
+        for ann in anns:
+            cat = int(ann["category_id"])
+            if 0 <= cat < num_classes:
+                class_counts[cat] += 1.0
+
+    nonzero = class_counts[class_counts > 0]
+    if nonzero.size == 0:
+        return [1.0] * len(dataset), class_counts.tolist(), [1.0] * num_classes
+
+    max_count = float(nonzero.max())
+    class_weights = np.ones(num_classes, dtype=np.float64)
+    for c in range(num_classes):
+        if class_counts[c] > 0:
+            class_weights[c] = (max_count / class_counts[c]) ** SAMPLER_ALPHA
+
+    image_weights = []
+    for image_id in dataset.image_ids:
+        anns = dataset.annotations.get(image_id, [])
+        classes = sorted({int(ann["category_id"]) for ann in anns if 0 <= int(ann["category_id"]) < num_classes})
+        if not classes:
+            image_weights.append(1.0)
+            continue
+
+        mean_class_weight = float(np.mean([class_weights[c] for c in classes]))
+        w_img = 1.0 + SAMPLER_CAP * mean_class_weight
+        w_img = min(SAMPLER_MAX_IMAGE_WEIGHT, max(1.0, w_img))
+        image_weights.append(w_img)
+
+    return image_weights, class_counts.tolist(), class_weights.tolist()
 
 
 def plot_losses(log_history, output_dir):
@@ -50,7 +90,7 @@ def plot_losses(log_history, output_dir):
         tail_max = max(train_losses[5:])
         if eval_losses:
             tail_max = max(tail_max, max(eval_losses))
-        plt.ylim(0, tail_max * 1.2)
+        plt.ylim(0.0, float(tail_max) * 1.2)
 
     plt.savefig(output_dir / "loss_curves.png")
     plt.close()
@@ -58,7 +98,7 @@ def plot_losses(log_history, output_dir):
 
 def plot_confusion_matrix(cm, classes, output_dir):
     plt.figure(figsize=(10, 8))
-    plt.imshow(cm, interpolation='nearest', cmap=plt.cm.Blues)
+    plt.imshow(cm, interpolation='nearest', cmap=plt.get_cmap("Blues"))
     plt.title('Confusion Matrix (IoU > 0.5)')
     plt.colorbar()
     target_names = [str(c) for c in classes] + ['Background']
@@ -229,11 +269,13 @@ class BestMapCheckpointCallback(TrainerCallback):
         self.eval_freq = eval_freq
         self.best_map = 0.0
 
-    def on_evaluate(self, args, state, control, model, **kwargs):
+    def on_evaluate(self, args, state, control, model=None, **kwargs):
+        if model is None:
+            return control
         current_epoch = round(state.epoch)
         is_last_epoch = current_epoch >= int(args.num_train_epochs)
         if current_epoch % self.eval_freq != 0 and not is_last_epoch:
-            return
+            return control
 
         map50 = compute_coco_map(model, self.eval_dataset, args.device, self.processor, self.eval_batch_size)
         print(f"  eval_map50 = {map50:.4f}  (best so far: {self.best_map:.4f})")
@@ -241,10 +283,32 @@ class BestMapCheckpointCallback(TrainerCallback):
             self.best_map = map50
             torch.save(model.state_dict(), self.output_dir / "best_map_model.pt")
             print("  --> New best mAP@0.50, checkpoint saved.")
+        return control
 
 
 class TorchCheckpointTrainer(Trainer):
     """Trainer variant that always writes torch checkpoints (.bin) to avoid safetensors aliasing issues."""
+
+    def __init__(self, **kwargs):
+        self.train_sampler = kwargs.pop("train_sampler", None)
+        super().__init__(**kwargs)
+
+    def get_train_dataloader(self):
+        if self.train_dataset is None:
+            raise ValueError("Trainer: training requires a train_dataset.")
+        train_dataset = self.train_dataset
+
+        return DataLoader(
+            train_dataset,
+            batch_size=self._train_batch_size,
+            sampler=self.train_sampler,
+            shuffle=self.train_sampler is None,
+            collate_fn=self.data_collator,
+            drop_last=self.args.dataloader_drop_last,
+            num_workers=self.args.dataloader_num_workers,
+            pin_memory=self.args.dataloader_pin_memory,
+            persistent_workers=self.args.dataloader_persistent_workers,
+        )
 
     def _save(self, output_dir=None, state_dict=None):
         checkpoint_dir = Path(output_dir) if output_dir is not None else Path(self.args.output_dir)
@@ -274,6 +338,23 @@ def main():
     parser.add_argument("--num-workers", type=int, default=4,
                         help="DataLoader worker processes (recommend 4 per GPU)")
     parser.add_argument("--output-dir", type=str, default="models")
+    parser.add_argument(
+        "--eval-every-epochs",
+        type=int,
+        default=2,
+        help="Run HF eval_loss every N epochs (reduces validation overhead vs every epoch)",
+    )
+    parser.add_argument(
+        "--map-eval-freq",
+        type=int,
+        default=MAP_EVAL_FREQ,
+        help="Run expensive COCO mAP callback every N epochs; set <=0 to disable during training",
+    )
+    parser.add_argument(
+        "--use-class-balanced-sampler",
+        action="store_true",
+        help="Enable time-neutral weighted sampling to upweight images containing rarer classes",
+    )
     parser.add_argument(
         "--metrics-threshold",
         type=float,
@@ -307,10 +388,13 @@ def main():
         is_train=False,
     )
 
-    steps_per_epoch = len(train_dataset) // args.batch_size
+    steps_per_epoch = math.ceil(len(train_dataset) / args.batch_size)
     total_steps = steps_per_epoch * args.epochs
     calculated_warmup_steps = int(total_steps * args.warmup_ratio)
+    eval_interval_epochs = max(1, int(args.eval_every_epochs))
+    eval_steps = steps_per_epoch * eval_interval_epochs
     print(f"Calculated warmup steps: {calculated_warmup_steps} over {total_steps} total steps.")
+    print(f"HF eval interval: every {eval_interval_epochs} epoch(s) ({eval_steps} steps).")
 
     model = DetrResnet50(num_classes=NUM_CLASSES)
 
@@ -335,8 +419,10 @@ def main():
         max_grad_norm=args.max_grad_norm,
         fp16=True,
         logging_steps=LOG_STEPS,
-        save_strategy="epoch",
-        eval_strategy="epoch",
+        save_strategy="steps",
+        save_steps=eval_steps,
+        eval_strategy="steps",
+        eval_steps=eval_steps,
         dataloader_num_workers=args.num_workers,
         dataloader_pin_memory=True,
         dataloader_persistent_workers=True,
@@ -362,14 +448,40 @@ def main():
 
     custom_optimizer = torch.optim.AdamW(param_dicts, weight_decay=args.weight_decay)
 
-    if sys.platform == "win32":
-        torch.backends.cudnn.enabled = False
-
-    callbacks = [
-        BestMapCheckpointCallback(
-            eval_dataset, image_processor, run_output_dir, args.eval_batch_size, eval_freq=MAP_EVAL_FREQ
+    train_sampler = None
+    if args.use_class_balanced_sampler:
+        print(
+            "Balanced sampler config (fixed): "
+            f"alpha={SAMPLER_ALPHA}, cap={SAMPLER_CAP}, max_image_weight={SAMPLER_MAX_IMAGE_WEIGHT}"
         )
-    ]
+        image_weights, class_counts, class_weights = build_class_balanced_image_weights(
+            train_dataset,
+            num_classes=NUM_CLASSES,
+        )
+        print(f"Class counts (mapped 0-9): {class_counts}")
+        print(f"Class weights: {[round(w, 4) for w in class_weights]}")
+        print(
+            "Image weight stats: "
+            f"min={min(image_weights):.3f}, mean={float(np.mean(image_weights)):.3f}, max={max(image_weights):.3f}"
+        )
+        train_sampler = WeightedRandomSampler(
+            weights=torch.tensor(image_weights, dtype=torch.double),
+            num_samples=len(train_dataset),
+            replacement=True,
+        )
+        print("Enabled class-balanced sampler (time-neutral: same samples per epoch).")
+
+    callbacks = []
+    if args.map_eval_freq > 0:
+        callbacks.append(
+            BestMapCheckpointCallback(
+                eval_dataset,
+                image_processor,
+                run_output_dir,
+                args.eval_batch_size,
+                eval_freq=args.map_eval_freq,
+            )
+        )
     if args.early_stopping_patience > 0:
         callbacks.append(
             EarlyStoppingCallback(
@@ -383,6 +495,7 @@ def main():
         args=training_args,
         train_dataset=train_dataset,
         eval_dataset=eval_dataset,
+        train_sampler=train_sampler,
         optimizers=(custom_optimizer, None),
         data_collator=DetrCollator(processor=image_processor),
         callbacks=callbacks,
