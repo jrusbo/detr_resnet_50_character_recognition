@@ -43,41 +43,6 @@ def find_latest_checkpoint(run_dir):
     return max(checkpoints, key=_extract_checkpoint_step)
 
 
-def validate_resume_checkpoint(checkpoint_dir, fp16_enabled):
-    """Ensure checkpoint has model + trainer/optimizer/scheduler/rng state for exact resume."""
-    checkpoint_dir = Path(checkpoint_dir)
-    has_torch_model = (checkpoint_dir / "pytorch_model.bin").exists()
-    has_safe_model = (checkpoint_dir / "model.safetensors").exists()
-    if not (has_torch_model or has_safe_model):
-        raise ValueError(
-            "Checkpoint missing model weights file (expected pytorch_model.bin or model.safetensors): "
-            f"{checkpoint_dir}"
-        )
-
-    required_files = [
-        "optimizer.pt",
-        "scheduler.pt",
-        "trainer_state.json",
-    ]
-    if fp16_enabled:
-        required_files.append("scaler.pt")
-
-    missing = [name for name in required_files if not (checkpoint_dir / name).exists()]
-    if missing:
-        raise ValueError(
-            "Checkpoint missing required resume files: "
-            f"{', '.join(missing)} at {checkpoint_dir}"
-        )
-
-    has_single_rng = (checkpoint_dir / "rng_state.pth").exists()
-    has_sharded_rng = any(checkpoint_dir.glob("rng_state_*.pth"))
-    if not (has_single_rng or has_sharded_rng):
-        raise ValueError(
-            "Checkpoint missing RNG state file(s): expected rng_state.pth "
-            f"or rng_state_*.pth at {checkpoint_dir}"
-        )
-
-
 def build_class_balanced_image_weights(dataset, num_classes):
     """Build per-image sampling weights from class frequencies (multi-class aware)."""
     class_counts = np.zeros(num_classes, dtype=np.float64)
@@ -501,7 +466,6 @@ def main():
 
         print(f"Resuming from checkpoint: {resume_checkpoint}")
         print(f"Run output directory: {run_output_dir}")
-        validate_resume_checkpoint(resume_checkpoint, fp16_enabled=True)
     else:
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
         run_output_dir = Path(args.output_dir) / f"run_{timestamp}"
@@ -614,11 +578,7 @@ def main():
 
     trainer.train(resume_from_checkpoint=str(resume_checkpoint) if resume_checkpoint else None)
 
-    # Load the checkpoint with the highest mAP@0.50 for final evaluation
-    best_weights = run_output_dir / "best_map_model.pt"
-    if best_weights.exists():
-        model.load_state_dict(torch.load(best_weights, map_location=trainer.args.device))
-        print(f"Loaded best mAP@0.50 model from {best_weights}")
+    # Evaluate the model state at the end of training (no post-hoc weight swap).
 
     plot_losses(trainer.state.log_history, run_output_dir)
     evaluate_metrics(
