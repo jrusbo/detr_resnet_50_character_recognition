@@ -2,6 +2,8 @@
 import contextlib
 import argparse
 import math
+import re
+import time
 from datetime import datetime
 from pathlib import Path
 import torch
@@ -26,6 +28,18 @@ MAP_SCORE_THRESHOLD = 0.2  # Score threshold for mAP evaluation (keep low to max
 SAMPLER_ALPHA = 0.5
 SAMPLER_CAP = 0.6
 SAMPLER_MAX_IMAGE_WEIGHT = 1.8
+
+
+def _extract_checkpoint_step(path):
+    match = re.fullmatch(r"checkpoint-(\d+)", path.name)
+    return int(match.group(1)) if match else -1
+
+
+def find_latest_checkpoint(run_dir):
+    checkpoints = [p for p in Path(run_dir).iterdir() if p.is_dir() and _extract_checkpoint_step(p) >= 0]
+    if not checkpoints:
+        return None
+    return max(checkpoints, key=_extract_checkpoint_step)
 
 
 def build_class_balanced_image_weights(dataset, num_classes):
@@ -286,6 +300,36 @@ class BestMapCheckpointCallback(TrainerCallback):
         return control
 
 
+class TimeLimitStopCallback(TrainerCallback):
+    """Gracefully stop training close to wall-clock limit and force a checkpoint save."""
+
+    def __init__(self, max_train_hours):
+        self.max_train_seconds = max_train_hours * 3600.0
+        self.start_time = None
+        self.triggered = False
+
+    def on_train_begin(self, args, state, control, **kwargs):
+        self.start_time = time.time()
+        self.triggered = False
+        return control
+
+    def on_step_end(self, args, state, control, **kwargs):
+        if self.triggered or self.start_time is None:
+            return control
+
+        elapsed = time.time() - self.start_time
+        if elapsed >= self.max_train_seconds:
+            self.triggered = True
+            elapsed_h = elapsed / 3600.0
+            print(
+                f"Reached wall-clock training limit ({elapsed_h:.2f}h >= {self.max_train_seconds / 3600.0:.2f}h). "
+                "Stopping and saving checkpoint for resume."
+            )
+            control.should_save = True
+            control.should_training_stop = True
+        return control
+
+
 class TorchCheckpointTrainer(Trainer):
     """Trainer variant that always writes torch checkpoints (.bin) to avoid safetensors aliasing issues."""
 
@@ -338,6 +382,21 @@ def main():
     parser.add_argument("--num-workers", type=int, default=4,
                         help="DataLoader worker processes (recommend 4 per GPU)")
     parser.add_argument("--output-dir", type=str, default="models")
+    parser.add_argument(
+        "--resume-from-checkpoint",
+        type=str,
+        default=None,
+        help=(
+            "Checkpoint directory or run directory to resume from. "
+            "If a run directory is provided, the latest checkpoint-* is used."
+        ),
+    )
+    parser.add_argument(
+        "--max-train-hours",
+        type=float,
+        default=11.8,
+        help="Wall-clock limit for a single session; trainer stops and saves to allow resume (Kaggle-safe).",
+    )
     parser.add_argument(
         "--eval-every-epochs",
         type=int,
@@ -399,9 +458,27 @@ def main():
     model = DetrResnet50(num_classes=NUM_CLASSES)
 
 
-    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-    run_output_dir = Path(args.output_dir) / f"run_{timestamp}"
-    run_output_dir.mkdir(parents=True, exist_ok=True)
+    resume_checkpoint = None
+    if args.resume_from_checkpoint:
+        resume_path = Path(args.resume_from_checkpoint).resolve()
+        if not resume_path.exists() or not resume_path.is_dir():
+            raise ValueError(f"Resume path does not exist or is not a directory: {resume_path}")
+
+        if _extract_checkpoint_step(resume_path) >= 0:
+            resume_checkpoint = resume_path
+            run_output_dir = resume_path.parent
+        else:
+            run_output_dir = resume_path
+            resume_checkpoint = find_latest_checkpoint(run_output_dir)
+            if resume_checkpoint is None:
+                raise ValueError(f"No checkpoint-* directories found under run directory: {run_output_dir}")
+
+        print(f"Resuming from checkpoint: {resume_checkpoint}")
+        print(f"Run output directory: {run_output_dir}")
+    else:
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        run_output_dir = Path(args.output_dir) / f"run_{timestamp}"
+        run_output_dir.mkdir(parents=True, exist_ok=True)
 
     image_processor = DeformableDetrImageProcessor.from_pretrained(
         "SenseTime/deformable-detr",
@@ -489,6 +566,8 @@ def main():
                 early_stopping_threshold=args.early_stopping_threshold,
             )
         )
+    if args.max_train_hours > 0:
+        callbacks.append(TimeLimitStopCallback(max_train_hours=args.max_train_hours))
 
     trainer = TorchCheckpointTrainer(
         model=model,
@@ -506,7 +585,7 @@ def main():
     if trainer.args.device.type == "cuda":
         print(f"GPU Name: {torch.cuda.get_device_name(trainer.args.device)}")
 
-    trainer.train()
+    trainer.train(resume_from_checkpoint=str(resume_checkpoint) if resume_checkpoint else None)
 
     # Load the checkpoint with the highest mAP@0.50 for final evaluation
     best_weights = run_output_dir / "best_map_model.pt"
