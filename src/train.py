@@ -527,6 +527,8 @@ def main():
         save_total_limit=CHECKPOINT_LIMIT,
         report_to="none",          # Disable wandb/tensorboard logging overhead
         load_best_model_at_end=False,
+        metric_for_best_model="eval_loss",
+        greater_is_better=False,
     )
 
     param_dicts = [
