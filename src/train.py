@@ -29,6 +29,8 @@ MAP_SCORE_THRESHOLD = 0.2  # Score threshold for mAP evaluation (keep low to max
 SAMPLER_ALPHA = 0.5
 SAMPLER_CAP = 0.6
 SAMPLER_MAX_IMAGE_WEIGHT = 1.8
+BEST_MAP_FILENAME = "best_map_model.pt"
+BEST_MAP_VALUE_FILENAME = "best_map_value.txt"
 
 
 def _extract_checkpoint_step(path):
@@ -41,6 +43,21 @@ def find_latest_checkpoint(run_dir):
     if not checkpoints:
         return None
     return max(checkpoints, key=_extract_checkpoint_step)
+
+
+def _read_best_map_value(output_dir):
+    best_map_file = Path(output_dir) / BEST_MAP_VALUE_FILENAME
+    if not best_map_file.exists():
+        return 0.0
+    try:
+        return float(best_map_file.read_text(encoding="utf-8").strip())
+    except (ValueError, OSError):
+        return 0.0
+
+
+def _write_best_map_value(output_dir, value):
+    best_map_file = Path(output_dir) / BEST_MAP_VALUE_FILENAME
+    best_map_file.write_text(f"{value:.6f}\n", encoding="utf-8")
 
 
 def build_class_balanced_image_weights(dataset, num_classes):
@@ -282,7 +299,7 @@ class BestMapCheckpointCallback(TrainerCallback):
         self.output_dir = Path(output_dir)
         self.eval_batch_size = eval_batch_size
         self.eval_freq = eval_freq
-        self.best_map = 0.0
+        self.best_map = _read_best_map_value(self.output_dir)
 
     def on_evaluate(self, args, state, control, model=None, **kwargs):
         if model is None:
@@ -296,7 +313,8 @@ class BestMapCheckpointCallback(TrainerCallback):
         print(f"  eval_map50 = {map50:.4f}  (best so far: {self.best_map:.4f})")
         if map50 > self.best_map:
             self.best_map = map50
-            torch.save(model.state_dict(), self.output_dir / "best_map_model.pt")
+            torch.save(model.state_dict(), self.output_dir / BEST_MAP_FILENAME)
+            _write_best_map_value(self.output_dir, self.best_map)
             print("  --> New best mAP@0.50, checkpoint saved.")
         return control
 
@@ -508,9 +526,7 @@ def main():
         ddp_find_unused_parameters=False,
         save_total_limit=CHECKPOINT_LIMIT,
         report_to="none",          # Disable wandb/tensorboard logging overhead
-        load_best_model_at_end=True,
-        metric_for_best_model="eval_loss",
-        greater_is_better=False,
+        load_best_model_at_end=False,
     )
 
     param_dicts = [
@@ -550,16 +566,16 @@ def main():
         print("Enabled class-balanced sampler (time-neutral: same samples per epoch).")
 
     callbacks = []
+    best_map_callback = None
     if args.map_eval_freq > 0:
-        callbacks.append(
-            BestMapCheckpointCallback(
-                eval_dataset,
-                image_processor,
-                run_output_dir,
-                args.eval_batch_size,
-                eval_freq=args.map_eval_freq,
-            )
+        best_map_callback = BestMapCheckpointCallback(
+            eval_dataset,
+            image_processor,
+            run_output_dir,
+            args.eval_batch_size,
+            eval_freq=args.map_eval_freq,
         )
+        callbacks.append(best_map_callback)
     if args.early_stopping_patience > 0:
         callbacks.append(
             EarlyStoppingCallback(
@@ -587,6 +603,24 @@ def main():
         print(f"GPU Name: {torch.cuda.get_device_name(trainer.args.device)}")
 
     trainer.train(resume_from_checkpoint=str(resume_checkpoint) if resume_checkpoint else None)
+
+    # Always evaluate final mAP@0.50 and update best_map_model.pt if this final state is better.
+    best_map_so_far = best_map_callback.best_map if best_map_callback is not None else _read_best_map_value(run_output_dir)
+    final_map50 = compute_coco_map(
+        model,
+        eval_dataset,
+        trainer.args.device,
+        image_processor,
+        args.eval_batch_size,
+        score_threshold=MAP_SCORE_THRESHOLD,
+    )
+    print(f"Final state eval_map50 = {final_map50:.4f}  (best so far: {best_map_so_far:.4f})")
+    if final_map50 > best_map_so_far:
+        torch.save(model.state_dict(), run_output_dir / BEST_MAP_FILENAME)
+        _write_best_map_value(run_output_dir, final_map50)
+        if best_map_callback is not None:
+            best_map_callback.best_map = final_map50
+        print("  --> Final state is new best mAP@0.50, checkpoint saved.")
 
     # Evaluate the model state at the end of training (no post-hoc weight swap).
 
