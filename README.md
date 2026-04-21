@@ -1,4 +1,7 @@
-# detr_resnet_50_character_recognition
+# NYCU Computer Vision 2026 HW2: Deformable DETR for Digit Detection
+
+* **Student ID:** 314553801
+* **Name:** Joaquin Rus Bono
 
 Digit detection project using Deformable DETR with a ResNet-50 backbone.
 
@@ -119,3 +122,9 @@ Optional arguments:
 - Source files include module headers and symbol docstrings.
 - Non-obvious implementation details are documented with brief comments.
 - Style follows PEP 8 and the repository Ruff configuration.
+
+## Performance Snapshot
+![Leaderboard Screenshot](assets/img.png)
+![Loss Curves](assets/loss_curves.png)
+![PR Curves](assets/pr_curves.png)
+![Confusion Matrix](assets/confusion_matrix.png)
