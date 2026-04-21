@@ -1,33 +1,49 @@
+"""Dataset and collator utilities for DETR training and inference."""
+
 import json
 from collections import defaultdict
 from pathlib import Path
-from PIL import Image
+
+import albumentations as A
 import numpy as np
+from PIL import Image
 from torch.utils.data import Dataset
 from transformers import DeformableDetrImageProcessor
-import albumentations as A
 
-TRAIN_TRANSFORMS = A.Compose([
-    A.ColorJitter(brightness=0.2, contrast=0.2, saturation=0.2, hue=0.0, p=0.5),
-    A.Affine(scale=(0.9, 1.1), translate_percent=(-0.05, 0.05), rotate=0, p=0.5),
-    A.GaussNoise(std_range=(0.02, 0.08), per_channel=True, p=0.2),
-], bbox_params=A.BboxParams(format='coco', label_fields=['class_labels', 'bbox_indices'], clip=True))
+TRAIN_TRANSFORMS = A.Compose(
+    [
+        A.ColorJitter(brightness=0.2, contrast=0.2, saturation=0.2, hue=0.0, p=0.5),
+        A.Affine(scale=(0.9, 1.1), translate_percent=(-0.05, 0.05), rotate=0, p=0.5),
+        A.GaussNoise(std_range=(0.02, 0.08), per_channel=True, p=0.2),
+    ],
+    bbox_params=A.BboxParams(
+        format="coco",
+        label_fields=["class_labels", "bbox_indices"],
+        clip=True,
+    ),
+)
+
 
 class CocoDetectionDataset(Dataset):
+    """COCO-format detection dataset with optional training augmentations.
+
+    Category IDs are remapped from 1-10 to 0-9 for compatibility with model outputs.
+    """
+
     def __init__(self, root_dir, annotation_file, is_train=False):
+        """Initialize dataset metadata and annotation index."""
         self.root_dir = root_dir
         self.is_train = is_train
         self.annotation_file = annotation_file
-        with open(annotation_file, 'r') as f:
+        with open(annotation_file, "r", encoding="utf-8") as f:
             self.coco = json.load(f)
 
-        self.images = {img['id']: img for img in self.coco['images']}
+        self.images = {img["id"]: img for img in self.coco["images"]}
         self.annotations = defaultdict(list)
-        for ann in self.coco['annotations']:
-            # Map categories from 1-10 down to 0-9 to avoid index out-of-bounds
+        for ann in self.coco["annotations"]:
             mapped_ann = ann.copy()
-            mapped_ann['category_id'] = mapped_ann['category_id'] - 1
-            self.annotations[ann['image_id']].append(mapped_ann)
+            mapped_ann["category_id"] = mapped_ann["category_id"] - 1
+            self.annotations[ann["image_id"]].append(mapped_ann)
 
         self.image_ids = list(self.images.keys())
 
@@ -37,6 +53,7 @@ class CocoDetectionDataset(Dataset):
             self.transform = None
 
     def __len__(self):
+        """Return dataset length."""
         return len(self.image_ids)
 
     @staticmethod
@@ -44,7 +61,7 @@ class CocoDetectionDataset(Dataset):
         """Clip COCO xywh boxes to image bounds and drop invalid boxes."""
         sanitized = []
         for ann in anns:
-            x, y, w, h = ann['bbox']
+            x, y, w, h = ann["bbox"]
             x = max(0.0, float(x))
             y = max(0.0, float(y))
             w = float(w)
@@ -61,19 +78,20 @@ class CocoDetectionDataset(Dataset):
                 continue
 
             ann_copy = ann.copy()
-            ann_copy['bbox'] = [x, y, clipped_w, clipped_h]
-            ann_copy['area'] = clipped_w * clipped_h
-            ann_copy['iscrowd'] = int(ann_copy.get('iscrowd', 0))
+            ann_copy["bbox"] = [x, y, clipped_w, clipped_h]
+            ann_copy["area"] = clipped_w * clipped_h
+            ann_copy["iscrowd"] = int(ann_copy.get("iscrowd", 0))
             sanitized.append(ann_copy)
         return sanitized
 
     def __getitem__(self, idx):
+        """Return a single image and target dictionary."""
         img_id = self.image_ids[idx]
         img_info = self.images[img_id]
-        img_path = Path(self.root_dir) / img_info['file_name']
+        img_path = Path(self.root_dir) / img_info["file_name"]
 
         image = np.array(Image.open(img_path).convert("RGB"))
-        anns = self._sanitize_annotations(self.annotations[img_id], img_info['width'], img_info['height'])
+        anns = self._sanitize_annotations(self.annotations[img_id], img_info["width"], img_info["height"])
 
         if self.transform is not None and len(anns) > 0:
             bboxes = [ann['bbox'] for ann in anns]
@@ -83,45 +101,47 @@ class CocoDetectionDataset(Dataset):
             transformed = self.transform(
                 image=image, bboxes=bboxes, class_labels=class_labels, bbox_indices=bbox_indices
             )
-            image = transformed['image']
+            image = transformed["image"]
 
             new_anns = []
-            for i, bbox in enumerate(transformed['bboxes']):
-                orig_idx = int(transformed['bbox_indices'][i])
+            for i, bbox in enumerate(transformed["bboxes"]):
+                orig_idx = int(transformed["bbox_indices"][i])
                 ann_copy = anns[orig_idx].copy()
-                ann_copy['bbox'] = list(bbox)
-                ann_copy['area'] = bbox[2] * bbox[3]
+                ann_copy["bbox"] = list(bbox)
+                ann_copy["area"] = bbox[2] * bbox[3]
                 new_anns.append(ann_copy)
             anns = self._sanitize_annotations(new_anns, image.shape[1], image.shape[0])
 
         image = Image.fromarray(image)
 
-        # Ensure area and iscrowd exist in all annotations
         for ann in anns:
-            if 'area' not in ann:
-                ann['area'] = ann['bbox'][2] * ann['bbox'][3]
-            if 'iscrowd' not in ann:
-                ann['iscrowd'] = 0
+            if "area" not in ann:
+                ann["area"] = ann["bbox"][2] * ann["bbox"][3]
+            if "iscrowd" not in ann:
+                ann["iscrowd"] = 0
 
-        target = {'image_id': img_id, 'annotations': anns, 'orig_size': image.size[::-1]}
+        target = {"image_id": img_id, "annotations": anns, "orig_size": image.size[::-1]}
 
         return image, target
 
+
 class InferenceImageDataset(Dataset):
-    """
-    Dataset for running inference on a folder of images without annotations.
-    """
+    """Dataset for inference on an image directory without annotations."""
+
     def __init__(self, root_dir):
+        """Collect supported image files from the given directory."""
         self.root_dir = Path(root_dir)
         self.image_files = [
             f for f in self.root_dir.iterdir()
-            if f.is_file() and f.suffix.lower() in {'.png', '.jpg', '.jpeg'}
+            if f.is_file() and f.suffix.lower() in {".png", ".jpg", ".jpeg"}
         ]
 
     def __len__(self):
+        """Return dataset length."""
         return len(self.image_files)
 
     def __getitem__(self, idx):
+        """Return one image and its metadata target."""
         img_path = self.image_files[idx]
         image = Image.open(str(img_path)).convert("RGB")
 
@@ -130,15 +150,16 @@ class InferenceImageDataset(Dataset):
         except ValueError:
             img_id = img_path.stem
 
-        target = {'image_id': img_id, 'orig_size': image.size[::-1]}
+        target = {"image_id": img_id, "orig_size": image.size[::-1]}
 
         return image, target
 
+
 class DetrCollator:
-    """
-    Collator that applies the DeformableDetrImageProcessor to a batch of raw images and annotations.
-    """
+    """Apply Deformable DETR preprocessing to a batch of dataset samples."""
+
     def __init__(self, processor=None):
+        """Create collator with provided processor or default pretrained one."""
         if processor is None:
             self.processor = DeformableDetrImageProcessor.from_pretrained(
                 "SenseTime/deformable-detr"
@@ -147,6 +168,7 @@ class DetrCollator:
             self.processor = processor
 
     def __call__(self, batch):
+        """Convert a batch of PIL images and targets into model input tensors."""
         images, targets = zip(*batch)
 
         if "annotations" in targets[0]:

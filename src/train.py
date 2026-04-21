@@ -1,4 +1,10 @@
-﻿import io
+﻿"""Train and evaluate a Deformable DETR digit detector.
+
+This module provides a CLI for training, checkpointing, resuming, metric plotting,
+and best-model tracking based on validation mAP@0.50.
+"""
+
+import io
 import contextlib
 import argparse
 import math
@@ -34,11 +40,13 @@ BEST_MAP_VALUE_FILENAME = "best_map_value.txt"
 
 
 def _extract_checkpoint_step(path):
+    """Return checkpoint step from a `checkpoint-<step>` directory name."""
     match = re.fullmatch(r"checkpoint-(\d+)", path.name)
     return int(match.group(1)) if match else -1
 
 
 def find_latest_checkpoint(run_dir):
+    """Find the highest-step checkpoint directory under a run directory."""
     checkpoints = [p for p in Path(run_dir).iterdir() if p.is_dir() and _extract_checkpoint_step(p) >= 0]
     if not checkpoints:
         return None
@@ -46,6 +54,7 @@ def find_latest_checkpoint(run_dir):
 
 
 def _read_best_map_value(output_dir):
+    """Read persisted best mAP value from disk, returning 0.0 if unavailable."""
     best_map_file = Path(output_dir) / BEST_MAP_VALUE_FILENAME
     if not best_map_file.exists():
         return 0.0
@@ -56,6 +65,7 @@ def _read_best_map_value(output_dir):
 
 
 def _write_best_map_value(output_dir, value):
+    """Persist best mAP value to disk for resume-safe tracking."""
     best_map_file = Path(output_dir) / BEST_MAP_VALUE_FILENAME
     best_map_file.write_text(f"{value:.6f}\n", encoding="utf-8")
 
@@ -96,6 +106,7 @@ def build_class_balanced_image_weights(dataset, num_classes):
 
 
 def plot_losses(log_history, output_dir):
+    """Plot train/eval loss curves from trainer log history."""
     train_steps, train_losses = [], []
     eval_steps, eval_losses = [], []
     for log in log_history:
@@ -129,6 +140,7 @@ def plot_losses(log_history, output_dir):
 
 
 def plot_confusion_matrix(cm, classes, output_dir):
+    """Render and save a confusion matrix image."""
     plt.figure(figsize=(10, 8))
     plt.imshow(cm, interpolation='nearest', cmap=plt.get_cmap("Blues"))
     plt.title('Confusion Matrix (IoU > 0.5)')
@@ -385,6 +397,7 @@ class TorchCheckpointTrainer(Trainer):
 
 
 def main():
+    """Parse CLI arguments and execute training/evaluation workflow."""
     parser = argparse.ArgumentParser("DETR training via HF Trainer")
     parser.add_argument("--data-root", type=str, default="datasets")
     parser.add_argument("--epochs", type=int, default=50)

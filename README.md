@@ -1,53 +1,121 @@
 # detr_resnet_50_character_recognition
-This repo is part of the class Selected Topics in Visual Recognition using Deep Learning of the NYCU.
 
-## Experimental Setup & Testing Strategy
+Digit detection project using Deformable DETR with a ResNet-50 backbone.
 
-To achieve the highest possible Mean Average Precision (mAP) for digit detection, we employ a structured ablation approach. Each test below isolates a specific hyperparameter or architectural decision. These tests form the basis of our final model selection and can be directly cited in the project report.
+This repository is used to train, resume, evaluate, and run inference on a COCO-style
+digit dataset (classes 1-10 in annotations, mapped to 0-9 internally).
 
-### 1. The Baseline Configuration
-**Command:**
+## Project Structure
+
+- `src/train.py`: main training entrypoint, checkpointing, resume logic, metric plots.
+- `src/predict.py`: inference script that writes COCO-format predictions (`pred.json`).
+- `src/dataset.py`: COCO dataset loaders, annotation sanitization, batch collator.
+- `src/models.py`: model definition (`DetrResnet50`).
+- `datasets/`: data folders and COCO annotations.
+- `models/`: run outputs (checkpoints, best model, plots, metrics).
+
+## Environment
+
+- Python: `3.13+`
+- Dependency manager: `uv`
+- Lint style: Ruff (`E`/`F`, line length `100`)
+
+Install dependencies:
+
 ```bash
-python src/train.py --epochs 10 --batch-size 16 --lr 2e-4 --lr-backbone 2e-5
+uv sync
 ```
-**Rationale:** 
-Establishes a solid control group using standard Deformable DETR defaults (Cosine learning rate scheduler, 2e-5 backbone LR, 2e-4 transformer LR, 10 epochs). We reduced epochs and increased batch size to prioritize computational efficiency, taking advantage of Deformable DETR's 10x faster convergence compared to Vanilla DETR. We need this baseline to measure whether our subsequent architectural tweaks actually improve the model.
 
-### 2. Extended Convergence & Heavy Regularization
-**Command:**
+This project requires internet access during training/inference startup to download
+`SenseTime/deformable-detr` assets from Hugging Face Hub.
+
+## Training
+
+Main command:
+
 ```bash
-python src/train.py --epochs 20 --batch-size 16 --weight-decay 2e-4
+python src/train.py --data-root datasets
 ```
-**Rationale:** 
-Although Deformable DETR matches quickly, the Hungarian Matcher bounding box alignments might still take a bit longer to perfectly stabilize on small digits. By extending the epochs to 20, we allow full convergence while maintaining strict compute limits. To prevent the model from memorizing the training images over this extended duration, we double the `weight-decay` (from `1e-4` to `2e-4`).
 
-### 3. Backbone Preservation (Extreme Differential LR)
-**Command:**
-```bash
-python src/train.py --epochs 10 --batch-size 16 --lr 2e-4 --lr-backbone 5e-6
-```
-**Rationale:** 
-The ResNet-50 weights are already heavily pre-trained. The new Deformable Transformer layers, however, are initialized from scratch. Using the baseline `2e-5` LR on the backbone might still be too aggressive and destroy the fine-grained edge-detection features ResNet already learned. Dropping the backbone LR to a conservative `5e-6` acts as a shield, freezing the ResNet's structural integrity while the decoder learns spatial mappings.
+Common experiment example:
 
-### 4. The Optimized Setup
-**Command:**
 ```bash
 python src/train.py --epochs 20 --batch-size 16 --weight-decay 2e-4 --lr-backbone 5e-6
 ```
-**Rationale:** 
-Combines the theoretical best parameters derived from the hypotheses above: extend the training duration to let the Hungarian Matcher perfectly settle, apply balanced regularization across the longer timeframe, and rigidly protect the pre-trained backbone.
 
-*(Note: We do not need to test aggressive image upscaling parameters like `min-size=1000` because Deformable DETR natively solves the "small object problem" via its multi-scale cross-attention feature pyramid over ResNet's C3-C5 layers. Upscaling would only cause massive Out-Of-Memory errors and slowdowns without theoretical benefit).*
+### What `train.py` saves
 
-## Inference / Prediction
+- Run directory: `models/run_YYYYMMDD_HHMMSS/`
+- Periodic checkpoints: `checkpoint-<step>/`
+- Best AP50 model: `best_map_model.pt`
+- Best AP50 scalar: `best_map_value.txt`
+- Plots: `loss_curves.png`, `confusion_matrix.png`, `pr_curves.png`
 
-Once you have trained a model and selected the best weights, you can generate the required `pred.json` in COCO format for the test dataset using the `predict.py` script.
+### Defaults (key arguments)
 
-**Command:**
+- `--epochs 50`
+- `--batch-size 8`
+- `--eval-batch-size 16`
+- `--lr 2e-4`
+- `--lr-backbone 2e-5`
+- `--weight-decay 1e-4`
+- `--warmup-ratio 0.05`
+- `--max-grad-norm 0.1`
+- `--min-size 200`
+- `--max-size 400`
+- `--num-workers 4`
+- `--eval-every-epochs 2`
+- `--map-eval-freq 5`
+- `--metrics-threshold 0.3`
+- `--early-stopping-patience 3` (`0` disables early stopping)
+- `--early-stopping-threshold 0.0`
+- `--max-train-hours 11.8`
+- `--use-class-balanced-sampler` (off by default)
+
+### Resume training
+
+Resume from a run directory (auto-picks latest `checkpoint-*`):
+
 ```bash
-python src/predict.py --weights models/<TARGET_RUN_DIR>/best_map_model.pt --data datasets/test
+python src/train.py --resume-from-checkpoint models/run_20260419_160432 --epochs 40
 ```
 
-**Notes:**
-- Replace `<TARGET_RUN_DIR>` with the specific run folder generated in `models/` (e.g., `run_20260417_172357`).
-- The script will process the images in `datasets/test` and automatically save a `pred.json` file inside the same directory as the weights file. This file is formatted exactly as required for the final evaluation submission.
+Resume from a specific checkpoint:
+
+```bash
+python src/train.py --resume-from-checkpoint models/run_20260419_160432/checkpoint-101500 --epochs 40
+```
+
+Important:
+
+- `--epochs` is the total target epoch count, not an increment.
+- Keep core settings consistent when resuming (`batch-size`, number of processes, data path).
+
+## Inference
+
+Generate `pred.json` from trained weights:
+
+```bash
+python src/predict.py --weights models/run_YYYYMMDD_HHMMSS/best_map_model.pt --data datasets/test
+```
+
+Optional arguments:
+
+- `--output` (default: same folder as weights, file `pred.json`)
+- `--batch-size` (default `8`)
+- `--num-workers` (default `2`)
+- `--threshold` (default `0.1`)
+- `--min-size` / `--max-size` (default `200` / `400`)
+
+## Metrics and Threshold Notes
+
+- Training-time best-model selection uses AP50 with threshold `0.2` (`MAP_SCORE_THRESHOLD`).
+- Final confusion matrix and PR plots use `--metrics-threshold` (default `0.3`).
+- For COCO-style AP50:95 evaluation experiments, lower score thresholds (for candidate generation)
+  are often better than aggressive filtering.
+
+## Documentation and Code Style
+
+- Source files include module headers and symbol docstrings.
+- Non-obvious implementation details are documented with brief comments.
+- Style follows PEP 8 and the repository Ruff configuration.

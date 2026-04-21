@@ -1,23 +1,22 @@
-"""
-This file contains all model related code
-"""
+"""Model definitions for the DETR ResNet-50 digit detector."""
+
 import torch.nn as nn
 from transformers import DeformableDetrConfig, DeformableDetrForObjectDetection
 
-# HuggingFace DETR automatically adds +1 to num_labels for the "no object" (background) class.
-# For 10 digit classes (0-9), set NUM_CLASSES = 10.
 NUM_CLASSES = 10
+
 
 class DetrResnet50(nn.Module):
     """
+    Wrapper around `DeformableDetrForObjectDetection` configured for 10 classes.
 
+    The backbone uses pretrained ResNet-50 weights while detection heads are initialized
+    according to the Deformable DETR configuration.
     """
+
     def __init__(self, num_classes=NUM_CLASSES):
+        """Initialize model configuration and instantiate underlying transformer model."""
         super().__init__()
-        # Initialize configuration with a pre-trained ResNet-50 backbone.
-        # This initializes the Transformer encoder/decoder and detection heads
-        # from scratch, complying with the restriction of only using pretrained
-        # weights for the backbone and avoiding external data in the rest of the model.
         config = DeformableDetrConfig(
             backbone="resnet50",
             use_pretrained_backbone=True,
@@ -27,7 +26,10 @@ class DetrResnet50(nn.Module):
         self.model = DeformableDetrForObjectDetection(config)
 
     def forward(self, pixel_values, pixel_mask=None, labels=None):
+        """Forward pass through the underlying Deformable DETR model."""
         return self.model(pixel_values=pixel_values, pixel_mask=pixel_mask, labels=labels)
 
+
 def get_model(num_classes=NUM_CLASSES):
+    """Return a configured `DetrResnet50` instance."""
     return DetrResnet50(num_classes=num_classes)
